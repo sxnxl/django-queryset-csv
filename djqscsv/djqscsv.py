@@ -8,6 +8,8 @@ from django.http import HttpResponse
 
 from django.utils import six
 
+import itertools
+
 """ A simple python package for turning django models into csvs """
 
 # Keyword arguments that will be used by this module
@@ -15,7 +17,8 @@ from django.utils import six
 DJQSCSV_KWARGS = {'field_header_map': None,
                   'field_serializer_map': None,
                   'use_verbose_names': True,
-                  'field_order': None}
+                  'field_order': None,
+                  'flattern_fields': None}
 
 
 class CSVException(Exception):
@@ -44,6 +47,32 @@ def render_to_csv_response(queryset, filename=None, append_datestamp=False,
 
     return response
 
+"""
+When you call values() on a queryset where the Model has a ManyToManyField
+and there are multiple related items, it returns a separate dictionary for each
+related item. This function merges the dictionaries so that there is only
+one dictionary per id at the end, with lists of related items for each.
+"""
+def merge_values(values, merge_key):
+    grouped_results = itertools.groupby(values, key=lambda value: value[merge_key])
+
+    merged_values = []
+    for k, g in grouped_results:
+        groups = list(g)
+        merged_value = {}
+        for group in groups:
+            for key, val in group.iteritems():
+                if not merged_value.get(key):
+                    merged_value[key] = val
+                elif val != merged_value[key]:
+                    if isinstance(merged_value[key], list):
+                        if val not in merged_value[key]:
+                            merged_value[key].append(val)
+                    else:
+                        old_val = merged_value[key]
+                        merged_value[key] = [old_val, val]
+        merged_values.append(merged_value)
+    return merged_values
 
 def write_csv(queryset, file_obj, **kwargs):
     """
@@ -56,6 +85,7 @@ def write_csv(queryset, file_obj, **kwargs):
     field_serializer_map = kwargs.get('field_serializer_map', {})
     use_verbose_names = kwargs.get('use_verbose_names', True)
     field_order = kwargs.get('field_order', None)
+    flattern_fields = kwargs.get('flattern_fields', [])
 
     csv_kwargs = {'encoding': 'utf-8'}
 
@@ -136,7 +166,24 @@ def write_csv(queryset, file_obj, **kwargs):
 
     writer.writerow(merged_header_map)
 
-    for record in values_qs:
+    unique_field = None
+    discard_unique_field = False
+    if flattern_fields:
+        if values_qs.model._meta.pk.name in merged_header_map.keys():
+            unique_field = values_qs.model._meta.pk.name
+        elif 'pk' in merged_header_map.keys():
+            unique_field = 'pk'
+        else:
+            values_qs = values_qs.values(*(values_qs.query.values_select + [values_qs.model._meta.pk.name]))
+            unique_field = values_qs.model._meta.pk.name
+            discard_unique_field = True
+        values = merge_values(values_qs, unique_field)
+    else:
+        values = values_qs
+
+    for record in values:
+        if discard_unique_field:
+            record.pop(unique_field)
         record = _sanitize_record(field_serializer_map, record)
         writer.writerow(record)
 
